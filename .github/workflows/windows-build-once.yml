@@ -1,0 +1,62 @@
+name: Windows build (fork, one-off)
+
+# Fork-only: builds the Windows installer from this branch the same way package.yml's windows job
+# does, without signing, release publication or cache saves. Not meant for upstream.
+on:
+  push:
+    branches: [ci/windows-build-once]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_BUILD_BUILD_DIR: "{workspace-root}/target"
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: "0"
+  CARGO_PROFILE_RELEASE_DEBUG: "line-tables-only"
+  CARGO_PROFILE_RELEASE_SPLIT_DEBUGINFO: "packed"
+  CARGO_PROFILE_RELEASE_STRIP: "debuginfo"
+  CINNABAR_SOURCE_ROOT: ${{ github.workspace }}
+
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 300
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install the pinned Rust toolchain
+        run: rustup toolchain install
+      - uses: actions/setup-go@v6
+        with:
+          go-version: 'stable'
+          cache: false
+      - name: Install WiX, ImageMagick and make
+        shell: pwsh
+        run: |
+          dotnet tool install --global wix --version 5.0.2
+          & "$env:USERPROFILE\.dotnet\tools\wix.exe" extension add -g WixToolset.BootstrapperApplications.wixext/5.0.2
+          choco install imagemagick --no-progress -y
+          if (-not (Get-Command make -ErrorAction SilentlyContinue)) { choco install make --no-progress -y }
+          $magick = Get-ChildItem "$env:ProgramFiles\ImageMagick*" -Directory | Select-Object -First 1
+          if (-not $magick) { throw "ImageMagick install directory not found" }
+          Add-Content $env:GITHUB_PATH $magick.FullName
+          Add-Content $env:GITHUB_PATH "$env:USERPROFILE\.dotnet\tools"
+          Add-Content $env:GITHUB_PATH "$env:ProgramData\chocolatey\bin"
+      - name: Build binaries and installer
+        run: |
+          make package-binaries
+          pwsh -NoProfile -File packaging/windows/build-installer.ps1 -Root "$CINNABAR_SOURCE_ROOT"
+          ls -la .local/dist/windows-release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: cinnabar-windows-x64-${{ github.sha }}
+          path: |
+            .local/dist/windows-release/Cinnabar-*-x64.msi
+            .local/dist/windows-release/Cinnabar-*-x64-setup.exe
+          if-no-files-found: error
